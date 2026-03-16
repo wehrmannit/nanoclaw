@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -237,6 +238,20 @@ function buildContainerArgs(
   } else {
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
+
+  // Pass integration credentials if configured
+  const integrationSecrets = readEnvFile([
+    'HA_URL', 'HA_TOKEN', 'N8N_URL', 'N8N_API_KEY', 'ORS_API_KEY',
+    'MEMOS_API_URL', 'MEMOS_USER_ID', 'MEMOS_CUBE_ID',
+  ]);
+  if (integrationSecrets.HA_URL) args.push('-e', `HA_URL=${integrationSecrets.HA_URL}`);
+  if (integrationSecrets.HA_TOKEN) args.push('-e', `HA_TOKEN=${integrationSecrets.HA_TOKEN}`);
+  if (integrationSecrets.N8N_URL) args.push('-e', `N8N_URL=${integrationSecrets.N8N_URL}`);
+  if (integrationSecrets.N8N_API_KEY) args.push('-e', `N8N_API_KEY=${integrationSecrets.N8N_API_KEY}`);
+  if (integrationSecrets.ORS_API_KEY) args.push('-e', `ORS_API_KEY=${integrationSecrets.ORS_API_KEY}`);
+  if (integrationSecrets.MEMOS_API_URL) args.push('-e', `MEMOS_API_URL=${integrationSecrets.MEMOS_API_URL}`);
+  if (integrationSecrets.MEMOS_USER_ID) args.push('-e', `MEMOS_USER_ID=${integrationSecrets.MEMOS_USER_ID}`);
+  if (integrationSecrets.MEMOS_CUBE_ID) args.push('-e', `MEMOS_CUBE_ID=${integrationSecrets.MEMOS_CUBE_ID}`);
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());

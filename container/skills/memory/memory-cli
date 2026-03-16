@@ -1,0 +1,145 @@
+#!/bin/sh
+# memory-cli — Personal fact storage for the assistant
+# Stores facts as structured JSON in the group workspace
+# Usage: memory-cli <command> [args...]
+
+set -e
+
+MEMORY_DIR="${MEMORY_DIR:-/workspace/group}"
+MEMORY_FILE="$MEMORY_DIR/facts.json"
+
+# Initialize file if missing
+if [ ! -f "$MEMORY_FILE" ]; then
+  echo '[]' > "$MEMORY_FILE"
+fi
+
+cmd="$1"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  store|add|remember)
+    # Store a fact: memory-cli store <category> <fact>
+    # Categories: personal, address, preference, contact, medical, work, other
+    if [ -z "$1" ] || [ -z "$2" ]; then
+      echo "Usage: memory-cli store <category> <fact>" >&2
+      echo "Categories: personal, address, preference, contact, medical, work, schedule, other" >&2
+      exit 1
+    fi
+    category="$1"
+    shift
+    fact="$*"
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    id=$(echo "$timestamp$fact" | md5sum 2>/dev/null | cut -c1-8 || echo "$RANDOM")
+
+    tmp=$(mktemp)
+    jq --arg id "$id" --arg cat "$category" --arg fact "$fact" --arg ts "$timestamp" \
+      '. + [{"id": $id, "category": $cat, "fact": $fact, "created": $ts, "updated": $ts}]' \
+      "$MEMORY_FILE" > "$tmp" && mv "$tmp" "$MEMORY_FILE"
+    echo "Stored: [$category] $fact"
+    ;;
+
+  update)
+    # Update a fact by ID: memory-cli update <id> <new_fact>
+    if [ -z "$1" ] || [ -z "$2" ]; then
+      echo "Usage: memory-cli update <id> <new_fact>" >&2
+      exit 1
+    fi
+    id="$1"
+    shift
+    fact="$*"
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    tmp=$(mktemp)
+    jq --arg id "$id" --arg fact "$fact" --arg ts "$timestamp" \
+      'map(if .id == $id then .fact = $fact | .updated = $ts else . end)' \
+      "$MEMORY_FILE" > "$tmp" && mv "$tmp" "$MEMORY_FILE"
+    echo "Updated: $id"
+    ;;
+
+  delete|forget)
+    # Delete a fact by ID: memory-cli delete <id>
+    if [ -z "$1" ]; then
+      echo "Usage: memory-cli delete <id>" >&2
+      exit 1
+    fi
+    tmp=$(mktemp)
+    jq --arg id "$1" 'map(select(.id != $id))' "$MEMORY_FILE" > "$tmp" && mv "$tmp" "$MEMORY_FILE"
+    echo "Deleted: $1"
+    ;;
+
+  search|find)
+    # Search facts: memory-cli search <query>
+    if [ -z "$1" ]; then
+      echo "Usage: memory-cli search <query>" >&2
+      exit 1
+    fi
+    query="$*"
+    jq -r --arg q "$query" \
+      '.[] | select(.fact | ascii_downcase | contains($q | ascii_downcase)) | "\(.id)\t[\(.category)]\t\(.fact)"' \
+      "$MEMORY_FILE"
+    ;;
+
+  list)
+    # List facts, optionally by category: memory-cli list [category]
+    if [ -n "$1" ]; then
+      jq -r --arg cat "$1" \
+        '.[] | select(.category == $cat) | "\(.id)\t[\(.category)]\t\(.fact)"' \
+        "$MEMORY_FILE"
+    else
+      jq -r '.[] | "\(.id)\t[\(.category)]\t\(.fact)"' "$MEMORY_FILE"
+    fi
+    ;;
+
+  categories)
+    # List all categories with counts
+    jq -r '[.[].category] | group_by(.) | map({category: .[0], count: length}) | .[] | "\(.category): \(.count)"' "$MEMORY_FILE"
+    ;;
+
+  get)
+    # Get a specific fact by ID: memory-cli get <id>
+    if [ -z "$1" ]; then
+      echo "Usage: memory-cli get <id>" >&2
+      exit 1
+    fi
+    jq --arg id "$1" '.[] | select(.id == $id)' "$MEMORY_FILE"
+    ;;
+
+  export)
+    # Export all facts as JSON
+    cat "$MEMORY_FILE"
+    ;;
+
+  count)
+    # Count total facts
+    jq 'length' "$MEMORY_FILE"
+    ;;
+
+  *)
+    cat <<'USAGE'
+memory-cli — Personal Fact Storage
+
+Commands:
+  store <category> <fact>       Save a new fact
+  update <id> <new_fact>        Update an existing fact
+  delete <id>                   Remove a fact
+  search <query>                Search facts by text
+  list [category]               List all facts or filter by category
+  categories                    Show categories and counts
+  get <id>                      Get a specific fact
+  count                         Total number of stored facts
+  export                        Export all facts as JSON
+
+Categories: personal, address, preference, contact, medical, work, schedule, other
+
+Examples:
+  memory-cli store address "Therapist Dr. Mueller is at Mariahilfer Str. 42, 1070 Vienna"
+  memory-cli store personal "Birthday is March 15"
+  memory-cli store preference "Prefers oat milk in coffee"
+  memory-cli store contact "Mom's phone: +43 664 1234567"
+  memory-cli store work "Office is at Karlsplatz 1, 3rd floor"
+  memory-cli search therapist
+  memory-cli list address
+  memory-cli delete a1b2c3d4
+USAGE
+    ;;
+esac

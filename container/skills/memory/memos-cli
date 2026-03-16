@@ -1,0 +1,155 @@
+#!/bin/sh
+# memos-cli — CLI wrapper for MemOS semantic memory API
+# Usage: memos-cli <command> [args...]
+#
+# Requires: MEMOS_API_URL environment variable
+
+set -e
+
+if [ -z "$MEMOS_API_URL" ]; then
+  echo "Error: MEMOS_API_URL environment variable must be set" >&2
+  exit 1
+fi
+
+BASE="${MEMOS_API_URL%/}"
+CT="Content-Type: application/json"
+USER_ID="${MEMOS_USER_ID:-nanoclaw}"
+CUBE_ID="${MEMOS_CUBE_ID:-default}"
+
+cmd="$1"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  add|store|remember)
+    # Add a memory: memos-cli add <content>
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli add <memory_content>" >&2
+      exit 1
+    fi
+    content="$*"
+    curl -sf -X POST -H "$CT" \
+      -d "{\"user_id\": \"$USER_ID\", \"memory_content\": \"$content\", \"writable_cube_ids\": [\"$CUBE_ID\"], \"async_mode\": \"sync\"}" \
+      "$BASE/product/add" 2>&1 | jq '{code: .code, message: .message}'
+    ;;
+
+  search|find|recall)
+    # Search memories: memos-cli search <query>
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli search <query>" >&2
+      exit 1
+    fi
+    query="$*"
+    curl -sf -X POST -H "$CT" \
+      -d "{\"query\": \"$query\", \"user_id\": \"$USER_ID\", \"readable_cube_ids\": [\"$CUBE_ID\"], \"mode\": \"fast\", \"top_k\": 10}" \
+      "$BASE/product/search" 2>&1 | jq -r '.data[]? | "\(.score // "?")\t\(.content // .memory_content // .text // .)"'
+    ;;
+
+  chat)
+    # Chat with memory context: memos-cli chat <query>
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli chat <query>" >&2
+      exit 1
+    fi
+    query="$*"
+    curl -sf -X POST -H "$CT" \
+      -d "{\"user_id\": \"$USER_ID\", \"query\": \"$query\", \"readable_cube_ids\": [\"$CUBE_ID\"], \"writable_cube_ids\": [\"$CUBE_ID\"], \"mode\": \"fast\", \"top_k\": 10}" \
+      "$BASE/product/chat/complete" 2>&1 | jq -r '.data.response // .data.content // .data // .'
+    ;;
+
+  list)
+    # List memories in a cube: memos-cli list [page] [page_size]
+    page="${1:-1}"
+    page_size="${2:-20}"
+    curl -sf -X POST -H "$CT" \
+      -d "{\"mem_cube_id\": \"$CUBE_ID\", \"user_id\": \"$USER_ID\", \"page\": $page, \"page_size\": $page_size}" \
+      "$BASE/product/get_memory" 2>&1 | jq -r '.data[]? | "\(.memory_id // .id)\t\(.content // .memory_content // .text // .)"'
+    ;;
+
+  get)
+    # Get a specific memory: memos-cli get <memory_id>
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli get <memory_id>" >&2
+      exit 1
+    fi
+    curl -sf -H "$CT" "$BASE/product/get_memory/$1" 2>&1 | jq .
+    ;;
+
+  delete)
+    # Delete a memory: memos-cli delete <memory_id>
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli delete <memory_id>" >&2
+      exit 1
+    fi
+    curl -sf -X POST -H "$CT" \
+      -d "{\"writable_cube_ids\": [\"$CUBE_ID\"], \"memory_ids\": [\"$1\"]}" \
+      "$BASE/product/delete_memory" 2>&1 | jq '{code: .code, message: .message}'
+    ;;
+
+  feedback)
+    # Provide feedback to refine memories: memos-cli feedback <feedback_text>
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli feedback <feedback_text>" >&2
+      exit 1
+    fi
+    feedback="$*"
+    curl -sf -X POST -H "$CT" \
+      -d "{\"user_id\": \"$USER_ID\", \"feedback_content\": \"$feedback\", \"writable_cube_ids\": [\"$CUBE_ID\"]}" \
+      "$BASE/product/feedback" 2>&1 | jq '{code: .code, message: .message}'
+    ;;
+
+  status)
+    # Check API health
+    curl -sf "$BASE/admin/health" 2>&1 | jq .
+    ;;
+
+  user-create)
+    # Create a user: memos-cli user-create <user_id> [user_name]
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli user-create <user_id> [user_name]" >&2
+      exit 1
+    fi
+    user_name="${2:-$1}"
+    curl -sf -X POST -H "$CT" \
+      -d "{\"user_id\": \"$1\", \"user_name\": \"$user_name\"}" \
+      "$BASE/product/users/register" 2>&1 | jq .
+    ;;
+
+  cube-create)
+    # Create a memory cube: memos-cli cube-create <cube_name> [owner_id]
+    if [ -z "$1" ]; then
+      echo "Usage: memos-cli cube-create <cube_name> [owner_id]" >&2
+      exit 1
+    fi
+    owner="${2:-$USER_ID}"
+    curl -sf -X POST -H "$CT" \
+      -d "{\"cube_name\": \"$1\", \"owner_id\": \"$owner\"}" \
+      "$BASE/product/configure" 2>&1 | jq .
+    ;;
+
+  *)
+    cat <<'USAGE'
+memos-cli — MemOS Semantic Memory
+
+Commands:
+  add <content>                    Store a memory (auto-extracted, deduplicated)
+  search <query>                   Semantic search across memories
+  chat <query>                     Chat with memory-aware context
+  list [page] [page_size]          List stored memories
+  get <memory_id>                  Get a specific memory
+  delete <memory_id>               Delete a memory
+  feedback <text>                  Refine/correct memories via feedback
+  status                           Check API health
+  user-create <id> [name]          Create a user
+  cube-create <name> [owner]       Create a memory cube
+
+Examples:
+  memos-cli add "My therapist Dr. Mueller is at Mariahilfer Str. 42, 1070 Vienna"
+  memos-cli add "Meeting with Anna every Tuesday at 10am"
+  memos-cli search "therapist address"
+  memos-cli search "weekly meetings"
+  memos-cli chat "Where is my therapist located?"
+  memos-cli feedback "Actually my therapist moved to Neubaugasse 15"
+  memos-cli list
+USAGE
+    ;;
+esac

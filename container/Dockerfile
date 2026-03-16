@@ -48,6 +48,13 @@ COPY agent-runner/ ./
 # Build TypeScript
 RUN npm run build
 
+# Install integration CLI tools
+COPY skills/home-assistant/home-assistant /usr/local/bin/home-assistant
+COPY skills/n8n/n8n-cli /usr/local/bin/n8n-cli
+COPY skills/routing/route-cli /usr/local/bin/route-cli
+COPY skills/memory/memory-cli /usr/local/bin/memory-cli
+COPY skills/memory/memos-cli /usr/local/bin/memos-cli
+
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 

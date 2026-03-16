@@ -1,0 +1,250 @@
+#!/bin/sh
+# route-cli — Travel time and directions via OpenRouteService
+# Usage: route-cli <command> [args...]
+#
+# Requires: ORS_API_KEY environment variable
+
+set -e
+
+if [ -z "$ORS_API_KEY" ]; then
+  echo "Error: ORS_API_KEY environment variable must be set" >&2
+  exit 1
+fi
+
+BASE="https://api.openrouteservice.org"
+AUTH="Authorization: $ORS_API_KEY"
+CT="Content-Type: application/json"
+
+cmd="$1"
+shift 2>/dev/null || true
+
+# Geocode a place name to lon,lat
+geocode_place() {
+  result=$(curl -sf -H "$AUTH" "$BASE/geocode/search?text=$(echo "$1" | sed 's/ /%20/g')&size=1" 2>&1)
+  lon=$(echo "$result" | jq -r '.features[0].geometry.coordinates[0] // empty')
+  lat=$(echo "$result" | jq -r '.features[0].geometry.coordinates[1] // empty')
+  name=$(echo "$result" | jq -r '.features[0].properties.label // empty')
+  if [ -z "$lon" ] || [ -z "$lat" ]; then
+    echo "Error: Could not geocode '$1'" >&2
+    return 1
+  fi
+  echo "$lon,$lat|$name"
+}
+
+# Parse a location argument — either "lon,lat" or a place name
+parse_location() {
+  case "$1" in
+    *,*)
+      # Already coordinates
+      echo "$1|coordinates"
+      ;;
+    *)
+      geocode_place "$1"
+      ;;
+  esac
+}
+
+format_duration() {
+  total_seconds="$1"
+  hours=$((total_seconds / 3600))
+  minutes=$(( (total_seconds % 3600) / 60 ))
+  if [ "$hours" -gt 0 ]; then
+    echo "${hours}h ${minutes}min"
+  else
+    echo "${minutes}min"
+  fi
+}
+
+format_distance() {
+  meters="$1"
+  km=$(echo "$meters" | awk '{printf "%.1f", $1/1000}')
+  echo "${km} km"
+}
+
+case "$cmd" in
+  directions|route)
+    # Get directions: route-cli directions <from> <to> [profile]
+    # Profile: driving-car (default), cycling-regular, foot-walking, driving-hgv
+    if [ -z "$1" ] || [ -z "$2" ]; then
+      echo "Usage: route-cli directions <from> <to> [profile]" >&2
+      echo "  from/to: place name or lon,lat coordinates" >&2
+      echo "  profile: driving-car (default), cycling-regular, foot-walking, driving-hgv" >&2
+      exit 1
+    fi
+    from_input="$1"
+    to_input="$2"
+    profile="${3:-driving-car}"
+
+    from_data=$(parse_location "$from_input") || exit 1
+    to_data=$(parse_location "$to_input") || exit 1
+    from_coords=$(echo "$from_data" | cut -d'|' -f1)
+    from_name=$(echo "$from_data" | cut -d'|' -f2)
+    to_coords=$(echo "$to_data" | cut -d'|' -f1)
+    to_name=$(echo "$to_data" | cut -d'|' -f2)
+
+    from_lon=$(echo "$from_coords" | cut -d',' -f1)
+    from_lat=$(echo "$from_coords" | cut -d',' -f2)
+    to_lon=$(echo "$to_coords" | cut -d',' -f1)
+    to_lat=$(echo "$to_coords" | cut -d',' -f2)
+
+    result=$(curl -sf -X POST -H "$AUTH" -H "$CT" \
+      -d "{\"coordinates\":[[$from_lon,$from_lat],[$to_lon,$to_lat]],\"instructions\":true,\"language\":\"en\"}" \
+      "$BASE/v2/directions/$profile/json" 2>&1)
+
+    error=$(echo "$result" | jq -r '.error.message // empty')
+    if [ -n "$error" ]; then
+      echo "Error: $error" >&2
+      exit 1
+    fi
+
+    duration=$(echo "$result" | jq -r '.routes[0].summary.duration' | awk '{printf "%d", $1}')
+    distance=$(echo "$result" | jq -r '.routes[0].summary.distance' | awk '{printf "%d", $1}')
+
+    echo "From: $from_name ($from_coords)"
+    echo "To:   $to_name ($to_coords)"
+    echo "Mode: $profile"
+    echo "Duration: $(format_duration $duration)"
+    echo "Distance: $(format_distance $distance)"
+    echo ""
+    echo "Steps:"
+    echo "$result" | jq -r '.routes[0].segments[].steps[] | "  \(.instruction) (\(.distance | . / 1000 | . * 10 | floor | . / 10)km, \(.duration | . / 60 | floor)min)"'
+    ;;
+
+  time)
+    # Quick travel time: route-cli time <from> <to> [profile]
+    if [ -z "$1" ] || [ -z "$2" ]; then
+      echo "Usage: route-cli time <from> <to> [profile]" >&2
+      exit 1
+    fi
+    from_input="$1"
+    to_input="$2"
+    profile="${3:-driving-car}"
+
+    from_data=$(parse_location "$from_input") || exit 1
+    to_data=$(parse_location "$to_input") || exit 1
+    from_coords=$(echo "$from_data" | cut -d'|' -f1)
+    to_coords=$(echo "$to_data" | cut -d'|' -f1)
+
+    from_lon=$(echo "$from_coords" | cut -d',' -f1)
+    from_lat=$(echo "$from_coords" | cut -d',' -f2)
+    to_lon=$(echo "$to_coords" | cut -d',' -f1)
+    to_lat=$(echo "$to_coords" | cut -d',' -f2)
+
+    result=$(curl -sf -X POST -H "$AUTH" -H "$CT" \
+      -d "{\"coordinates\":[[$from_lon,$from_lat],[$to_lon,$to_lat]]}" \
+      "$BASE/v2/directions/$profile/json" 2>&1)
+
+    duration=$(echo "$result" | jq -r '.routes[0].summary.duration' | awk '{printf "%d", $1}')
+    distance=$(echo "$result" | jq -r '.routes[0].summary.distance' | awk '{printf "%d", $1}')
+
+    echo "$(format_duration $duration) ($(format_distance $distance)) by $profile"
+    ;;
+
+  geocode)
+    # Geocode a place name: route-cli geocode <place>
+    if [ -z "$1" ]; then
+      echo "Usage: route-cli geocode <place_name>" >&2
+      exit 1
+    fi
+    curl -sf -H "$AUTH" "$BASE/geocode/search?text=$(echo "$*" | sed 's/ /%20/g')&size=5" 2>&1 | \
+      jq -r '.features[] | "\(.properties.label)\t\(.geometry.coordinates[0]),\(.geometry.coordinates[1])"'
+    ;;
+
+  matrix)
+    # Travel time matrix: route-cli matrix <place1> <place2> <place3> ... [--profile <profile>]
+    # Returns travel times between all pairs
+    profile="driving-car"
+    places=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--profile" ]; then
+        shift
+        profile="$1"
+      else
+        places="$places|$1"
+      fi
+      shift
+    done
+    places="${places#|}"
+
+    if [ -z "$places" ]; then
+      echo "Usage: route-cli matrix <place1> <place2> [place3...] [--profile <profile>]" >&2
+      exit 1
+    fi
+
+    coords_json="["
+    names=""
+    IFS='|'
+    first=true
+    for place in $places; do
+      data=$(parse_location "$place") || exit 1
+      coords=$(echo "$data" | cut -d'|' -f1)
+      name=$(echo "$data" | cut -d'|' -f2)
+      lon=$(echo "$coords" | cut -d',' -f1)
+      lat=$(echo "$coords" | cut -d',' -f2)
+      if [ "$first" = true ]; then
+        coords_json="$coords_json[$lon,$lat]"
+        names="$name"
+        first=false
+      else
+        coords_json="$coords_json,[$lon,$lat]"
+        names="$names|$name"
+      fi
+    done
+    unset IFS
+    coords_json="$coords_json]"
+
+    result=$(curl -sf -X POST -H "$AUTH" -H "$CT" \
+      -d "{\"locations\":$coords_json,\"metrics\":[\"duration\",\"distance\"]}" \
+      "$BASE/v2/matrix/$profile" 2>&1)
+
+    echo "Travel time matrix ($profile):"
+    echo "$result" | jq -r '.durations[] | [.[] | . / 60 | floor | tostring + "min"] | join("\t")'
+    ;;
+
+  isochrone)
+    # Reachability area: route-cli isochrone <place> <minutes> [profile]
+    if [ -z "$1" ] || [ -z "$2" ]; then
+      echo "Usage: route-cli isochrone <place> <minutes> [profile]" >&2
+      exit 1
+    fi
+    place_data=$(parse_location "$1") || exit 1
+    coords=$(echo "$place_data" | cut -d'|' -f1)
+    lon=$(echo "$coords" | cut -d',' -f1)
+    lat=$(echo "$coords" | cut -d',' -f2)
+    minutes="$2"
+    profile="${3:-driving-car}"
+    seconds=$((minutes * 60))
+
+    result=$(curl -sf -X POST -H "$AUTH" -H "$CT" \
+      -d "{\"locations\":[[$lon,$lat]],\"range\":[$seconds]}" \
+      "$BASE/v2/isochrones/$profile" 2>&1)
+
+    echo "$result" | jq '.features[0].properties | {center: .center, range_seconds: .value, area_sq_km: (.area | . / 1000000 | . * 100 | floor | . / 100)}'
+    ;;
+
+  *)
+    cat <<'USAGE'
+route-cli — Travel Time & Directions (OpenRouteService)
+
+Commands:
+  directions <from> <to> [profile]    Full directions with turn-by-turn steps
+  time <from> <to> [profile]          Quick travel time and distance
+  geocode <place>                     Look up coordinates for a place
+  matrix <p1> <p2> [p3...] [--profile x]  Travel time between multiple places
+  isochrone <place> <minutes> [profile]   Area reachable within N minutes
+
+Profiles: driving-car (default), cycling-regular, foot-walking, driving-hgv
+
+Locations can be place names or lon,lat coordinates.
+
+Examples:
+  route-cli time "Vienna" "Graz"
+  route-cli time "Vienna" "Graz" cycling-regular
+  route-cli directions "Stephansplatz, Vienna" "Schönbrunn, Vienna"
+  route-cli time 16.3738,48.2082 15.4395,47.0707
+  route-cli geocode "Hauptbahnhof Wien"
+  route-cli matrix "Vienna" "Graz" "Linz" "Salzburg"
+  route-cli isochrone "Vienna" 30
+USAGE
+    ;;
+esac

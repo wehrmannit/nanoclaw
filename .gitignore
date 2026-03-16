@@ -36,3 +36,9 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# MemOS (cloned source for Docker build)
+memos/MemOS/
+
+# Runtime files
+nanoclaw.pid

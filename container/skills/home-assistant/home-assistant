@@ -1,0 +1,136 @@
+#!/bin/sh
+# home-assistant — CLI wrapper for Home Assistant REST API
+# Usage: home-assistant <command> [args...]
+#
+# Requires: HA_URL and HA_TOKEN environment variables
+
+set -e
+
+if [ -z "$HA_URL" ] || [ -z "$HA_TOKEN" ]; then
+  echo "Error: HA_URL and HA_TOKEN environment variables must be set" >&2
+  exit 1
+fi
+
+BASE="${HA_URL%/}/api"
+AUTH="Authorization: Bearer $HA_TOKEN"
+CT="Content-Type: application/json"
+
+cmd="$1"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  status)
+    curl -sf -H "$AUTH" "$BASE/" 2>&1
+    ;;
+
+  states)
+    # List all entity states, optionally filtered by domain
+    if [ -n "$1" ]; then
+      curl -sf -H "$AUTH" "$BASE/states" 2>&1 | jq -r ".[] | select(.entity_id | startswith(\"$1.\")) | \"\(.entity_id): \(.state) (\(.attributes.friendly_name // \"\")\""
+    else
+      curl -sf -H "$AUTH" "$BASE/states" 2>&1 | jq -r '.[] | "\(.entity_id): \(.state) (\(.attributes.friendly_name // ""))"'
+    fi
+    ;;
+
+  state)
+    # Get state of a specific entity
+    if [ -z "$1" ]; then
+      echo "Usage: home-assistant state <entity_id>" >&2
+      exit 1
+    fi
+    curl -sf -H "$AUTH" "$BASE/states/$1" 2>&1 | jq .
+    ;;
+
+  call)
+    # Call a service: home-assistant call <domain> <service> [entity_id] [json_data]
+    domain="$1"
+    service="$2"
+    entity="$3"
+    data="$4"
+    if [ -z "$domain" ] || [ -z "$service" ]; then
+      echo "Usage: home-assistant call <domain> <service> [entity_id] [json_data]" >&2
+      exit 1
+    fi
+    if [ -n "$data" ]; then
+      curl -sf -X POST -H "$AUTH" -H "$CT" -d "$data" "$BASE/services/$domain/$service" 2>&1
+    elif [ -n "$entity" ]; then
+      curl -sf -X POST -H "$AUTH" -H "$CT" -d "{\"entity_id\": \"$entity\"}" "$BASE/services/$domain/$service" 2>&1
+    else
+      curl -sf -X POST -H "$AUTH" -H "$CT" -d "{}" "$BASE/services/$domain/$service" 2>&1
+    fi
+    ;;
+
+  history)
+    # Get history: home-assistant history <entity_id> [hours_back]
+    if [ -z "$1" ]; then
+      echo "Usage: home-assistant history <entity_id> [hours_back]" >&2
+      exit 1
+    fi
+    hours="${2:-24}"
+    timestamp=$(date -u -d "$hours hours ago" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-${hours}H +%Y-%m-%dT%H:%M:%S 2>/dev/null)
+    curl -sf -H "$AUTH" "$BASE/history/period/$timestamp?filter_entity_id=$1&minimal_response" 2>&1 | jq .
+    ;;
+
+  services)
+    # List available services, optionally filtered by domain
+    if [ -n "$1" ]; then
+      curl -sf -H "$AUTH" "$BASE/services" 2>&1 | jq ".[] | select(.domain == \"$1\")"
+    else
+      curl -sf -H "$AUTH" "$BASE/services" 2>&1 | jq -r '.[].domain' | sort -u
+    fi
+    ;;
+
+  entities)
+    # List entities by domain
+    if [ -n "$1" ]; then
+      curl -sf -H "$AUTH" "$BASE/states" 2>&1 | jq -r ".[] | select(.entity_id | startswith(\"$1.\")) | .entity_id"
+    else
+      curl -sf -H "$AUTH" "$BASE/states" 2>&1 | jq -r '.[].entity_id' | sed 's/\..*//' | sort -u
+    fi
+    ;;
+
+  event)
+    # Fire an event: home-assistant event <event_type> [json_data]
+    event_type="$1"
+    data="${2:-{}}"
+    if [ -z "$event_type" ]; then
+      echo "Usage: home-assistant event <event_type> [json_data]" >&2
+      exit 1
+    fi
+    curl -sf -X POST -H "$AUTH" -H "$CT" -d "$data" "$BASE/events/$event_type" 2>&1
+    ;;
+
+  template)
+    # Render a Jinja2 template: home-assistant template '<template>'
+    if [ -z "$1" ]; then
+      echo "Usage: home-assistant template '<jinja2_template>'" >&2
+      exit 1
+    fi
+    curl -sf -X POST -H "$AUTH" -H "$CT" -d "{\"template\": \"$1\"}" "$BASE/template" 2>&1
+    ;;
+
+  *)
+    cat <<'USAGE'
+home-assistant — Home Assistant CLI
+
+Commands:
+  status                              Check API connectivity
+  states [domain]                     List entity states (optionally filter by domain)
+  state <entity_id>                   Get detailed state of an entity
+  entities [domain]                   List entity IDs (optionally filter by domain)
+  call <domain> <service> [entity_id] [json]  Call a service
+  history <entity_id> [hours_back]    Get state history (default: 24h)
+  services [domain]                   List available services
+  event <event_type> [json]           Fire an event
+  template '<jinja2>'                 Render a Jinja2 template
+
+Examples:
+  home-assistant states light                    # All lights
+  home-assistant state sensor.temperature        # Specific sensor
+  home-assistant call light turn_on light.living_room
+  home-assistant call climate set_temperature climate.thermostat '{"temperature": 21}'
+  home-assistant history sensor.temperature 12   # Last 12 hours
+  home-assistant template '{{ states("sensor.temperature") }}'
+USAGE
+    ;;
+esac

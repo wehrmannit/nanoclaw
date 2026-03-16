@@ -1,0 +1,148 @@
+#!/bin/sh
+# n8n-cli — CLI wrapper for n8n REST API
+# Usage: n8n-cli <command> [args...]
+#
+# Requires: N8N_URL and N8N_API_KEY environment variables
+
+set -e
+
+if [ -z "$N8N_URL" ] || [ -z "$N8N_API_KEY" ]; then
+  echo "Error: N8N_URL and N8N_API_KEY environment variables must be set" >&2
+  exit 1
+fi
+
+BASE="${N8N_URL%/}/api/v1"
+AUTH="X-N8N-API-KEY: $N8N_API_KEY"
+CT="Content-Type: application/json"
+
+cmd="$1"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  workflows)
+    # List workflows, optionally filtered by active status
+    if [ "$1" = "--active" ]; then
+      curl -sf -H "$AUTH" "$BASE/workflows?active=true" 2>&1 | jq -r '.data[] | "\(.id)\t\(.active)\t\(.name)"'
+    elif [ "$1" = "--inactive" ]; then
+      curl -sf -H "$AUTH" "$BASE/workflows?active=false" 2>&1 | jq -r '.data[] | "\(.id)\t\(.active)\t\(.name)"'
+    else
+      curl -sf -H "$AUTH" "$BASE/workflows" 2>&1 | jq -r '.data[] | "\(.id)\t\(.active)\t\(.name)"'
+    fi
+    ;;
+
+  workflow)
+    # Get workflow details
+    if [ -z "$1" ]; then
+      echo "Usage: n8n-cli workflow <id>" >&2
+      exit 1
+    fi
+    curl -sf -H "$AUTH" "$BASE/workflows/$1" 2>&1 | jq .
+    ;;
+
+  activate)
+    # Activate a workflow
+    if [ -z "$1" ]; then
+      echo "Usage: n8n-cli activate <workflow_id>" >&2
+      exit 1
+    fi
+    curl -sf -X PATCH -H "$AUTH" -H "$CT" -d '{"active": true}' "$BASE/workflows/$1" 2>&1 | jq '{id: .id, name: .name, active: .active}'
+    ;;
+
+  deactivate)
+    # Deactivate a workflow
+    if [ -z "$1" ]; then
+      echo "Usage: n8n-cli deactivate <workflow_id>" >&2
+      exit 1
+    fi
+    curl -sf -X PATCH -H "$AUTH" -H "$CT" -d '{"active": false}' "$BASE/workflows/$1" 2>&1 | jq '{id: .id, name: .name, active: .active}'
+    ;;
+
+  execute)
+    # Execute a workflow (must have a manual trigger or webhook)
+    if [ -z "$1" ]; then
+      echo "Usage: n8n-cli execute <workflow_id> [json_data]" >&2
+      exit 1
+    fi
+    wf_id="$1"
+    data="${2:-{}}"
+    curl -sf -X POST -H "$AUTH" -H "$CT" -d "$data" "$BASE/workflows/$wf_id/run" 2>&1 | jq .
+    ;;
+
+  executions)
+    # List executions, optionally for a specific workflow
+    if [ -n "$1" ]; then
+      curl -sf -H "$AUTH" "$BASE/executions?workflowId=$1&limit=10" 2>&1 | jq -r '.data[] | "\(.id)\t\(.status)\t\(.startedAt)\t\(.workflowId)"'
+    else
+      curl -sf -H "$AUTH" "$BASE/executions?limit=10" 2>&1 | jq -r '.data[] | "\(.id)\t\(.status)\t\(.startedAt)\t\(.workflowId)"'
+    fi
+    ;;
+
+  execution)
+    # Get execution details
+    if [ -z "$1" ]; then
+      echo "Usage: n8n-cli execution <execution_id>" >&2
+      exit 1
+    fi
+    curl -sf -H "$AUTH" "$BASE/executions/$1" 2>&1 | jq .
+    ;;
+
+  credentials)
+    # List credentials
+    curl -sf -H "$AUTH" "$BASE/credentials" 2>&1 | jq -r '.data[] | "\(.id)\t\(.type)\t\(.name)"'
+    ;;
+
+  tags)
+    # List tags
+    curl -sf -H "$AUTH" "$BASE/tags" 2>&1 | jq -r '.data[] | "\(.id)\t\(.name)"'
+    ;;
+
+  webhook)
+    # Trigger a webhook workflow: n8n-cli webhook <path> [json_data]
+    # The path is the webhook path configured in the Webhook node
+    if [ -z "$1" ]; then
+      echo "Usage: n8n-cli webhook <path> [json_data]" >&2
+      exit 1
+    fi
+    webhook_path="$1"
+    data="${2:-{}}"
+    curl -sf -X POST -H "$CT" -d "$data" "${N8N_URL%/}/webhook/$webhook_path" 2>&1
+    ;;
+
+  webhook-test)
+    # Trigger a test webhook (only works when workflow is open in n8n editor)
+    if [ -z "$1" ]; then
+      echo "Usage: n8n-cli webhook-test <path> [json_data]" >&2
+      exit 1
+    fi
+    webhook_path="$1"
+    data="${2:-{}}"
+    curl -sf -X POST -H "$CT" -d "$data" "${N8N_URL%/}/webhook-test/$webhook_path" 2>&1
+    ;;
+
+  *)
+    cat <<'USAGE'
+n8n-cli — n8n Workflow Automation CLI
+
+Commands:
+  workflows [--active|--inactive]     List workflows (ID, active, name)
+  workflow <id>                       Get workflow details
+  activate <id>                       Activate a workflow
+  deactivate <id>                     Deactivate a workflow
+  execute <id> [json]                 Execute a workflow
+  executions [workflow_id]            List recent executions
+  execution <id>                      Get execution details
+  credentials                         List credentials
+  tags                                List tags
+  webhook <path> [json]              Trigger a production webhook
+  webhook-test <path> [json]         Trigger a test webhook
+
+Examples:
+  n8n-cli workflows                              # List all workflows
+  n8n-cli workflows --active                     # Only active workflows
+  n8n-cli execute 5                              # Run workflow #5
+  n8n-cli execute 5 '{"key": "value"}'           # Run with input data
+  n8n-cli executions 5                           # Recent runs of workflow #5
+  n8n-cli webhook my-hook '{"event": "test"}'    # Trigger webhook
+USAGE
+    ;;
+esac
